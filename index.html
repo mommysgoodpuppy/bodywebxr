@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Three.js AR Body & Hand Tracking</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <style>
+        body { margin: 0; }
+        canvas { width: 100%; height: 100%; display: block; }
+        #ar-button {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            padding: 12px 24px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-size: 16px;
+            cursor: pointer;
+            z-index: 100;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <button id="ar-button">Enter AR</button>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.160.0/three.module.min.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+        import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
+
+        let camera, scene, renderer;
+        let bodyMeshes = new Map();
+        let mirroredMeshes = new Map();
+        let mirror, hand1, hand2;
+        const arButton = document.getElementById('ar-button');
+
+        init();
+
+        function createMirror() {
+            const geometry = new THREE.PlaneGeometry(2, 3);
+            const material = new THREE.MeshBasicMaterial({
+                color: 0x808080,
+                transparent: true,
+                opacity: 0,
+                side: THREE.DoubleSide
+            });
+            
+            mirror = new THREE.Mesh(geometry, material);
+            mirror.position.set(0, 1.5, -1);
+            scene.add(mirror);
+        }
+
+        function setupHands() {
+            const handModelFactory = new XRHandModelFactory();
+
+            hand1 = renderer.xr.getHand(0);
+            hand1.add(handModelFactory.createHandModel(hand1));
+            scene.add(hand1);
+
+            hand2 = renderer.xr.getHand(1);
+            hand2.add(handModelFactory.createHandModel(hand2));
+            scene.add(hand2);
+        }
+
+        function mirrorVector(point) {
+            const mirrorNormal = new THREE.Vector3(0, 0, 1).applyQuaternion(mirror.quaternion);
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(mirrorNormal, mirror.position);
+            const mirroredPoint = point.clone();
+            plane.projectPoint(point, mirroredPoint);
+            mirroredPoint.sub(point).multiplyScalar(2).add(point);
+            return mirroredPoint;
+        }
+
+        function mirrorQuaternion(q) {
+            const mirroredQ = q.clone();
+            mirroredQ.y *= -1;
+            mirroredQ.z *= -1;
+            return mirroredQ;
+        }
+        
+        function createJointMesh(jointName, isMirrored = false) {
+            let color = 0x00ff00;
+            if (jointName.includes('foot')) {
+                color = 0x0000ff;
+            } else if (jointName === 'root') {
+                color = 0xff0000;
+            }
+            
+            const mesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.02, 8, 8),
+                new THREE.MeshStandardMaterial({ 
+                    color: color,
+                    opacity: isMirrored ? 0.7 : 1,
+                    transparent: isMirrored
+                })
+            );
+            mesh.name = isMirrored ? `mirrored-${jointName}` : jointName;
+            return mesh;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
+            camera.position.set(0, 1.6, 3);
+
+            scene.add(new THREE.HemisphereLight(0xbcbcbc, 0xa5a5a5, 3));
+
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            document.body.appendChild(renderer.domElement);
+
+            createMirror();
+            setupHands();
+            checkARSupport();
+
+            const bodyJoints = [
+                "root", "hips", "spine-lower", "spine-middle", "spine-upper", "chest",
+                "neck", "head", "left-shoulder", "left-arm-upper", "left-arm-lower",
+                "right-shoulder", "right-arm-upper", "right-arm-lower",
+                "left-upper-leg", "left-lower-leg", "right-upper-leg", "right-lower-leg",
+                "left-foot-ankle", "left-foot-ball",
+                "right-foot-ankle", "right-foot-ball"
+            ];
+
+            bodyJoints.forEach(jointName => {
+                const mesh = createJointMesh(jointName);
+                bodyMeshes.set(jointName, mesh);
+                scene.add(mesh);
+
+                const mirroredMesh = createJointMesh(jointName, true);
+                mirroredMeshes.set(jointName, mirroredMesh);
+                scene.add(mirroredMesh);
+            });
+
+            window.addEventListener('resize', () => {
+                camera.aspect = window.innerWidth / window.innerHeight;
+                camera.updateProjectionMatrix();
+                renderer.setSize(window.innerWidth, window.innerHeight);
+            });
+        }
+
+        function checkARSupport() {
+            if (navigator.xr) {
+                navigator.xr.isSessionSupported('immersive-ar').then((supported) => {
+                    if (supported) {
+                        arButton.style.display = 'block';
+                        arButton.addEventListener('click', onRequestSession);
+                    }
+                });
+            }
+        }
+
+        async function onRequestSession() {
+            try {
+                const session = await navigator.xr.requestSession('immersive-ar', {
+                    requiredFeatures: ['local-floor', 'hand-tracking', 'body-tracking'],
+                    optionalFeatures: ['dom-overlay'],
+                    domOverlay: { root: document.body }
+                });
+
+                session.addEventListener('end', onSessionEnd);
+                arButton.textContent = 'Exit AR';
+                arButton.removeEventListener('click', onRequestSession);
+                arButton.addEventListener('click', () => session.end());
+
+                renderer.xr.setSession(session);
+                renderer.setAnimationLoop(render);
+            } catch (error) {
+                console.error('Error starting AR session:', error);
+            }
+        }
+
+        function onSessionEnd() {
+            arButton.textContent = 'Enter AR';
+            arButton.removeEventListener('click', onSessionEnd);
+            arButton.addEventListener('click', onRequestSession);
+            renderer.setAnimationLoop(null);
+        }
+
+        function updateMirrorPosition(frame) {
+            if (!frame) return;
+            
+            const pose = frame.getViewerPose(renderer.xr.getReferenceSpace());
+            if (!pose || !pose.views[0]) return;
+
+            const view = pose.views[0];
+            const viewMatrix = new THREE.Matrix4().fromArray(view.transform.matrix);
+            const viewPosition = new THREE.Vector3();
+            const viewRotation = new THREE.Quaternion();
+            
+            viewMatrix.decompose(viewPosition, viewRotation, new THREE.Vector3());
+
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(viewRotation);
+            forward.y = 0;
+            forward.normalize();
+
+            mirror.position.copy(viewPosition);
+            mirror.position.y = 1.5;
+            mirror.position.add(forward.multiplyScalar(1));
+            mirror.lookAt(viewPosition.x, mirror.position.y, viewPosition.z);
+        }
+
+        function updateBodyTracking(frame) {
+            const referenceSpace = renderer.xr.getReferenceSpace();
+            
+            if (frame.body) {
+                for (const [jointName, bodySpace] of frame.body) {
+                    const pose = frame.getPose(bodySpace, referenceSpace);
+                    if (pose && bodyMeshes.has(jointName)) {
+                        const mesh = bodyMeshes.get(jointName);
+                        mesh.position.set(
+                            pose.transform.position.x,
+                            pose.transform.position.y,
+                            pose.transform.position.z
+                        );
+                        mesh.quaternion.set(
+                            pose.transform.orientation.x,
+                            pose.transform.orientation.y,
+                            pose.transform.orientation.z,
+                            pose.transform.orientation.w
+                        );
+                        mesh.visible = true;
+
+                        const mirroredMesh = mirroredMeshes.get(jointName);
+                        if (mirroredMesh) {
+                            const mirroredPos = mirrorVector(mesh.position);
+                            mirroredMesh.position.copy(mirroredPos);
+                            const mirroredRot = mirrorQuaternion(mesh.quaternion);
+                            mirroredMesh.quaternion.copy(mirroredRot);
+                            mirroredMesh.visible = true;
+                        }
+                    }
+                }
+            } else {
+                for (const mesh of bodyMeshes.values()) {
+                    mesh.visible = false;
+                }
+                for (const mesh of mirroredMeshes.values()) {
+                    mesh.visible = false;
+                }
+            }
+        }
+
+        function render(timestamp, frame) {
+            if (frame) {
+                updateMirrorPosition(frame);
+                updateBodyTracking(frame);
+            }
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
